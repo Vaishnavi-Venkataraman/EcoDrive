@@ -3,35 +3,44 @@ import sqlite3
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from folium.plugins import HeatMap
+import numpy as np
 
-st.set_page_config(page_title="EcoDrive Intelligence", layout="wide")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="EcoDrive Pro: Enterprise Telematics", layout="wide")
 
+# --- THEME-AGNOSTIC STYLING ---
 st.markdown("""
     <style>
-    /* Force metric text to be visible regardless of theme */
-    [data-testid="stMetricValue"] {
-        color: #004d40 !important;
-        font-weight: bold !important;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #333333 !important;
-        font-size: 1.1rem !important;
-    }
-    /* Style the metric cards */
+    [data-testid="stMetricValue"] { font-weight: bold !important; }
+    [data-testid="stMetricLabel"] { font-size: 1.1rem !important; }
     [data-testid="stMetric"] {
-        background-color: #ffffff;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        border: 1px solid #e0e0e0;
+        border: 1px solid rgba(128, 128, 128, 0.3);
+        padding: 15px;
+        border-radius: 10px;
+        background-color: rgba(128, 128, 128, 0.05);
     }
-    .main { background-color: #f8f9fa; }
+    .status-card {
+        padding: 15px;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin-bottom: 10px;
+        font-weight: bold;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.2);
+    }
+    .stDataFrame {
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        border-radius: 10px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
+# --- DATABASE ENGINE ---
+@st.cache_data(ttl=600)
 def get_data(query):
     try:
-        conn = sqlite3.connect('ecodrive.db')
+        conn = sqlite3.connect('ecodrive.db', check_same_thread=False)
         df = pd.read_sql_query(query, conn)
         conn.close()
         return df
@@ -39,83 +48,120 @@ def get_data(query):
         st.error(f"Database Error: {e}")
         return pd.DataFrame()
 
-st.title("🚗 EcoDrive: Fleet Telematics & Safety Dashboard")
-st.markdown("Processing **17.5M GPS data points** to identify fuel waste and high-risk driving behavior.")
-
-st.sidebar.header("Fleet Controls")
-with st.sidebar:
-    taxis_df = get_data("SELECT DISTINCT tid FROM trajectories LIMIT 11000")
-    if not taxis_df.empty:
-        taxi_list = taxis_df['tid'].tolist()
-        taxi_id = st.selectbox("Select Vehicle ID", taxi_list)
-    else:
-        st.error("No Taxi IDs found in Database.")
-        taxi_id = None
-
-    st.markdown("---")
-
-if taxi_id:
-    st.header("📊 Performance Overview")
+# --- ANALYTICS LOGIC ---
+def calculate_eco_score(idle_mins, safety_violations):
+    # Ensure inputs are numbers
+    idle_val = 0 if idle_mins is None or np.isnan(idle_mins) else idle_mins
+    viol_val = 0 if safety_violations is None else safety_violations
     
-    idle_query = f"""
-        SELECT sum(idle_minutes) as total_idle, 
-               sum(estimated_fuel_waste_gal) as fuel_waste 
-        FROM v_idle_events 
-        WHERE tid = {taxi_id}
-    """
-    metrics_df = get_data(idle_query)
+    base_score = 100
+    penalty = (idle_val * 0.3) + (viol_val * 10)
+    return max(0, min(100, base_score - penalty))
 
-    if not metrics_df.empty:
-        total_idle = metrics_df['total_idle'].iloc[0] or 0.0
-        fuel_lost = metrics_df['fuel_waste'].iloc[0] or 0.0
-        cost_loss = fuel_lost * 3.80  # Estimated $3.80 per gallon
+# --- SIDEBAR & NAVIGATION ---
+st.sidebar.title("🎛️ EcoDrive Pro")
+nav = st.sidebar.radio("Navigation", ["Fleet Intelligence", "Safety Diagnostics"])
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Idling Time", f"{total_idle:.1f} Mins")
-        col2.metric("Fuel Wasted", f"{fuel_lost:.2f} Gal")
-        col3.metric("Estimated Cost Loss", f"${cost_loss:.2f}")
+if nav == "Fleet Intelligence":
+    st.title("🏆 Fleet Performance & City Hotspots")
+    
+    with st.spinner('Aggregating fleet-wide trends...'):
+        fleet_stats_query = """
+            SELECT tid, 
+                   SUM(idle_minutes) as total_idle_mins, 
+                   SUM(estimated_fuel_waste_gal) as fuel_wasted_gal
+            FROM v_idle_events
+            WHERE tid % 10 = 0
+            GROUP BY tid
+            ORDER BY fuel_wasted_gal DESC
+            LIMIT 25
+        """
+        leaderboard_df = get_data(fleet_stats_query)
 
-    st.header("🗺️ Trip Trajectory & Incident Mapping")
-    tab1, tab2 = st.tabs(["Interactive Map", "Raw Incident Data"])
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.subheader("Top Fuel Wasters")
+        st.dataframe(leaderboard_df.style.format({"fuel_wasted_gal": "{:.2f}", "total_idle_mins": "{:.1f}"}), use_container_width=True)
 
-    with tab1:
-        # Get trajectory for mapping
-        route_query = f"SELECT latitude, longitude FROM trajectories WHERE tid = {taxi_id} ORDER BY timestamp LIMIT 2000"
-        route_df = get_data(route_query)
+    with col2:
+        st.subheader("Fuel Waste Distribution")
+        st.bar_chart(leaderboard_df.set_index('tid')['fuel_wasted_gal'])
 
-        # Get idling incidents for red markers
-        incidents_query = f"SELECT latitude, longitude, idle_minutes FROM v_idle_events WHERE tid = {taxi_id} AND idle_minutes > 5"
-        incidents_df = get_data(incidents_query)
+    st.subheader("🔥 Beijing Idling Hotspots")
+    st.info("Visualizing high-density fuel waste zones across the city grid.")
+    
+    heatmap_data = get_data("SELECT latitude, longitude, idle_minutes FROM v_idle_events LIMIT 5000")
+    if not heatmap_data.empty:
+        h_map = folium.Map(location=[39.9042, 116.4074], zoom_start=11, tiles="CartoDB dark_matter")
+        heat_data = [[row['latitude'], row['longitude'], row['idle_minutes']] for index, row in heatmap_data.iterrows()]
+        HeatMap(heat_data).add_to(h_map)
+        st_folium(h_map, width=1400, height=500, key="fleet_heatmap")
 
-        if not route_df.empty:
-            # Center map on the vehicle's first point
-            center_lat = route_df.iloc[0]['latitude']
-            center_lon = route_df.iloc[0]['longitude']
-            
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles="cartodbpositron")
+else:
+    # --- SAFETY DIAGNOSTICS ---
+    st.sidebar.header("Vehicle Selection")
+    taxis_df = get_data("SELECT DISTINCT tid FROM trajectories LIMIT 500")
+    taxi_id = st.sidebar.selectbox("Select Vehicle ID", taxis_df['tid'].tolist())
 
-            # 1. Draw Path (Blue Line)
-            path_coords = route_df[['latitude', 'longitude']].values.tolist()
-            folium.PolyLine(path_coords, color="#2E86C1", weight=4, opacity=0.8).add_to(m)
+    st.title(f"🛡️ Safety & Risk Report: Vehicle {taxi_id}")
 
-            # 2. Add Red Circle Markers for Idling Zones
-            for _, row in incidents_df.iterrows():
-                folium.CircleMarker(
-                    location=[row['latitude'], row['longitude']],
-                    radius=min(row['idle_minutes'], 20), # Cap radius for visibility
-                    color="#E74C3C",
-                    fill=True,
-                    fill_color="#E74C3C",
-                    popup=f"Idling: {row['idle_minutes']:.1f} mins"
-                ).add_to(m)
+    # 1. Fetch Fresh Data
+    route_df = get_data(f"SELECT * FROM trajectories WHERE tid = {taxi_id} ORDER BY timestamp")
+    incidents_df = get_data(f"SELECT * FROM v_idle_events WHERE tid = {taxi_id} ORDER BY start_idle")
 
-            st_folium(m, width=1400, height=600)
+    # 2. Calculation (Perform BEFORE formatting time to strings)
+    if not incidents_df.empty:
+        total_idle = incidents_df['idle_minutes'].sum()
+        # Capture critical violations (duration > 18 mins)
+        num_violations = len(incidents_df[incidents_df['idle_minutes'] > 18])
+    else:
+        total_idle = 0
+        num_violations = 0
+    
+    score = calculate_eco_score(total_idle, num_violations)
+
+    # 3. Display Metrics
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Eco-Score", f"{score:.0f}/100")
+    col2.metric("Total Idle", f"{total_idle:.1f}m")
+    col3.metric("Safety Violations", num_violations)
+    
+    with col4:
+        if score > 85:
+            st.markdown('<div class="status-card" style="background-color: #2ecc71;">EXCELLENT</div>', unsafe_allow_html=True)
+        elif score > 60:
+            st.markdown('<div class="status-card" style="background-color: #f39c12;">CAUTION</div>', unsafe_allow_html=True)
         else:
-            st.warning(f"No trajectory data available for Vehicle {taxi_id}.")
+            st.markdown('<div class="status-card" style="background-color: #e74c3c;">HIGH RISK</div>', unsafe_allow_html=True)
 
-    with tab2:
-        st.subheader(f"Detailed Incident Log: Vehicle {taxi_id}")
+    # 4. Spatial Mapping
+    st.subheader("📍 Geospatial Incident Map")
+    if not route_df.empty:
+        m = folium.Map(location=[route_df.iloc[0]['latitude'], route_df.iloc[0]['longitude']], zoom_start=13, tiles="OpenStreetMap")
+        folium.PolyLine(route_df[['latitude', 'longitude']].values.tolist(), color="#3498db", weight=2, opacity=0.6).add_to(m)
+        
+        # Add Markers using the original numeric data
         if not incidents_df.empty:
-            st.dataframe(incidents_df, use_container_width=True)
-        else:
-            st.write("No significant idling incidents recorded for this vehicle.")
+            for _, row in incidents_df.iterrows():
+                # Logic: Red for > 18m, Orange for moderate
+                is_critical = float(row['idle_minutes']) > 18
+                folium.Marker(
+                    location=[row['latitude'], row['longitude']],
+                    icon=folium.Icon(color='red' if is_critical else 'orange', icon='exclamation-triangle', prefix='fa'),
+                    popup=f"Idle: {row['idle_minutes']:.1f}m"
+                ).add_to(m)
+        
+        st_folium(m, width=1400, height=500, key=f"map_taxi_{taxi_id}")
+    else:
+        st.warning(f"No trajectory GPS data found for Vehicle ID {taxi_id}.")
+
+    # 5. Final Formatting for Display/Export
+    if not incidents_df.empty:
+        incidents_df['start_idle'] = pd.to_datetime(incidents_df['start_idle']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        incidents_df['end_idle'] = pd.to_datetime(incidents_df['end_idle']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    st.subheader("📝 Incident Detailed Log")
+    st.dataframe(incidents_df, use_container_width=True)
+    
+    csv_data = incidents_df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Safety Report (CSV)", csv_data, f"taxi_{taxi_id}_safety.csv", "text/csv")
