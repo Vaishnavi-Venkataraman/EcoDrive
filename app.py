@@ -5,15 +5,15 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap
 import numpy as np
+import joblib
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="EcoDrive Pro: Enterprise Telematics", layout="wide")
+st.set_page_config(page_title="EcoDrive Pro: AI Telematics", layout="wide")
 
 # --- THEME-AGNOSTIC STYLING ---
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-weight: bold !important; }
-    [data-testid="stMetricLabel"] { font-size: 1.1rem !important; }
     [data-testid="stMetric"] {
         border: 1px solid rgba(128, 128, 128, 0.3);
         padding: 15px;
@@ -27,11 +27,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 10px;
         font-weight: bold;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.2);
-    }
-    .stDataFrame {
-        border: 1px solid rgba(128, 128, 128, 0.2);
-        border-radius: 10px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -48,48 +43,34 @@ def get_data(query):
         st.error(f"Database Error: {e}")
         return pd.DataFrame()
 
-# --- ANALYTICS LOGIC ---
-def calculate_eco_score(idle_mins, safety_violations):
-    # Ensure inputs are numbers
-    idle_val = 0 if idle_mins is None or np.isnan(idle_mins) else idle_mins
-    viol_val = 0 if safety_violations is None else safety_violations
-    
-    base_score = 100
-    penalty = (idle_val * 0.3) + (viol_val * 10)
-    return max(0, min(100, base_score - penalty))
+# --- ML MODEL LOADER ---
+@st.cache_resource
+def load_risk_model():
+    try:
+        return joblib.load('driver_risk_model.pkl')
+    except:
+        return None
 
 # --- SIDEBAR & NAVIGATION ---
-st.sidebar.title("🎛️ EcoDrive Pro")
+st.sidebar.title("🎛️ EcoDrive Pro AI")
 nav = st.sidebar.radio("Navigation", ["Fleet Intelligence", "Safety Diagnostics"])
 
 if nav == "Fleet Intelligence":
     st.title("🏆 Fleet Performance & City Hotspots")
     
     with st.spinner('Aggregating fleet-wide trends...'):
-        fleet_stats_query = """
-            SELECT tid, 
-                   SUM(idle_minutes) as total_idle_mins, 
-                   SUM(estimated_fuel_waste_gal) as fuel_wasted_gal
-            FROM v_idle_events
-            WHERE tid % 10 = 0
-            GROUP BY tid
-            ORDER BY fuel_wasted_gal DESC
-            LIMIT 25
-        """
-        leaderboard_df = get_data(fleet_stats_query)
+        fleet_query = "SELECT tid, SUM(idle_minutes) as total_idle_mins, SUM(estimated_fuel_waste_gal) as fuel_wasted_gal FROM v_idle_events WHERE tid % 10 = 0 GROUP BY tid ORDER BY fuel_wasted_gal DESC LIMIT 25"
+        leaderboard_df = get_data(fleet_query)
 
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader("Top Fuel Wasters")
         st.dataframe(leaderboard_df.style.format({"fuel_wasted_gal": "{:.2f}", "total_idle_mins": "{:.1f}"}), use_container_width=True)
-
     with col2:
         st.subheader("Fuel Waste Distribution")
         st.bar_chart(leaderboard_df.set_index('tid')['fuel_wasted_gal'])
 
     st.subheader("🔥 Beijing Idling Hotspots")
-    st.info("Visualizing high-density fuel waste zones across the city grid.")
-    
     heatmap_data = get_data("SELECT latitude, longitude, idle_minutes FROM v_idle_events LIMIT 5000")
     if not heatmap_data.empty:
         h_map = folium.Map(location=[39.9042, 116.4074], zoom_start=11, tiles="CartoDB dark_matter")
@@ -105,63 +86,68 @@ else:
 
     st.title(f"🛡️ Safety & Risk Report: Vehicle {taxi_id}")
 
-    # 1. Fetch Fresh Data
+    # 1. Fetch Data
     route_df = get_data(f"SELECT * FROM trajectories WHERE tid = {taxi_id} ORDER BY timestamp")
     incidents_df = get_data(f"SELECT * FROM v_idle_events WHERE tid = {taxi_id} ORDER BY start_idle")
 
-    # 2. Calculation (Perform BEFORE formatting time to strings)
-    if not incidents_df.empty:
-        total_idle = incidents_df['idle_minutes'].sum()
-        # Capture critical violations (duration > 18 mins)
-        num_violations = len(incidents_df[incidents_df['idle_minutes'] > 18])
-    else:
-        total_idle = 0
-        num_violations = 0
-    
-    score = calculate_eco_score(total_idle, num_violations)
+    # 2. Stats Calculation
+    total_idle = incidents_df['idle_minutes'].sum() if not incidents_df.empty else 0
+    num_violations = len(incidents_df[incidents_df['idle_minutes'] > 18]) if not incidents_df.empty else 0
+    curr_score = max(0, 100 - (total_idle * 0.3) - (num_violations * 10))
 
-    # 3. Display Metrics
+    # 3. AI Predictive Insight
+    st.subheader("🤖 AI Predictive Insight")
+    model = load_risk_model()
+    if model:
+        avg_idle_val = total_idle / max(1, len(incidents_df))
+        features = np.array([[avg_idle_val, len(incidents_df)]])
+        risk_proba = model.predict_proba(features)[0][1]
+        
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            st.metric("Predicted Risk Prob.", f"{risk_proba*100:.1f}%")
+        with col_b:
+            # Enhanced AI Logic: Aligning AI warning with the traditional Eco-Score
+            if risk_proba > 0.6 or curr_score < 40:
+                st.error("⚠️ HIGH PREDICTIVE RISK: AI predicts likely future fuel waste or safety incidents based on trip patterns.")
+            else:
+                st.success("✅ LOW PREDICTIVE RISK: AI predicts stable driving patterns.")
+    else:
+        st.warning("Run predictive_analytics.py to enable AI insights.")
+
+    # 4. Metrics Display
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Eco-Score", f"{score:.0f}/100")
+    col1.metric("Eco-Score", f"{curr_score:.0f}/100")
     col2.metric("Total Idle", f"{total_idle:.1f}m")
     col3.metric("Safety Violations", num_violations)
-    
     with col4:
-        if score > 85:
-            st.markdown('<div class="status-card" style="background-color: #2ecc71;">EXCELLENT</div>', unsafe_allow_html=True)
-        elif score > 60:
-            st.markdown('<div class="status-card" style="background-color: #f39c12;">CAUTION</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="status-card" style="background-color: #e74c3c;">HIGH RISK</div>', unsafe_allow_html=True)
+        color = "#2ecc71" if curr_score > 85 else "#f39c12" if curr_score > 60 else "#e74c3c"
+        st.markdown(f'<div class="status-card" style="background-color: {color};">{"EXCELLENT" if curr_score > 85 else "CAUTION" if curr_score > 60 else "HIGH RISK"}</div>', unsafe_allow_html=True)
 
-    # 4. Spatial Mapping
+    # 5. Map
     st.subheader("📍 Geospatial Incident Map")
     if not route_df.empty:
         m = folium.Map(location=[route_df.iloc[0]['latitude'], route_df.iloc[0]['longitude']], zoom_start=13, tiles="OpenStreetMap")
         folium.PolyLine(route_df[['latitude', 'longitude']].values.tolist(), color="#3498db", weight=2, opacity=0.6).add_to(m)
-        
-        # Add Markers using the original numeric data
         if not incidents_df.empty:
             for _, row in incidents_df.iterrows():
-                # Logic: Red for > 18m, Orange for moderate
-                is_critical = float(row['idle_minutes']) > 18
-                folium.Marker(
-                    location=[row['latitude'], row['longitude']],
-                    icon=folium.Icon(color='red' if is_critical else 'orange', icon='exclamation-triangle', prefix='fa'),
-                    popup=f"Idle: {row['idle_minutes']:.1f}m"
-                ).add_to(m)
-        
+                is_crit = float(row['idle_minutes']) > 18
+                folium.Marker([row['latitude'], row['longitude']], icon=folium.Icon(color='red' if is_crit else 'orange', icon='exclamation-triangle', prefix='fa')).add_to(m)
         st_folium(m, width=1400, height=500, key=f"map_taxi_{taxi_id}")
-    else:
-        st.warning(f"No trajectory GPS data found for Vehicle ID {taxi_id}.")
 
-    # 5. Final Formatting for Display/Export
+    # 6. Detailed Log & Export CSV
     if not incidents_df.empty:
+        # Format strings for CSV/Display to prevent Excel #### error
         incidents_df['start_idle'] = pd.to_datetime(incidents_df['start_idle']).dt.strftime('%Y-%m-%d %H:%M:%S')
         incidents_df['end_idle'] = pd.to_datetime(incidents_df['end_idle']).dt.strftime('%Y-%m-%d %H:%M:%S')
-
+        
     st.subheader("📝 Incident Detailed Log")
     st.dataframe(incidents_df, use_container_width=True)
     
-    csv_data = incidents_df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Safety Report (CSV)", csv_data, f"taxi_{taxi_id}_safety.csv", "text/csv")
+    # RESTORED EXPORT BUTTON
+    st.download_button(
+        label="📥 Download Safety Report (CSV)",
+        data=incidents_df.to_csv(index=False).encode('utf-8'),
+        file_name=f"safety_report_vehicle_{taxi_id}.csv",
+        mime='text/csv'
+    )
