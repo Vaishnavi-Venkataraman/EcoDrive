@@ -1,0 +1,17 @@
+# Web Framework & Dashboard
+streamlit
+
+# Data Processing & Math
+pandas
+numpy
+
+# Database
+# sqlite3 is part of the Python Standard Library, no install needed
+
+# Machine Learning & AI
+scikit-learn
+joblib
+
+# Geospatial Visualization
+folium
+streamlit-folium
