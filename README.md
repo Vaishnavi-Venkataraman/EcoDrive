@@ -36,6 +36,18 @@ Where:
 - Hybrid AI system combining ML predictions with rule-based safety logic  
 ---
 
+## 🔍 Exploratory Data Analysis (EDA)
+
+EDA transformed **17.5M GPS pings** into a structured telematics dataset, focusing on geospatial noise, temporal patterns, and outlier detection.
+
+### **Core Workflows**
+
+**Geospatial Noise:** Used the **Haversine formula** to filter GPS drift and detect idling clusters (<10m displacement).  
+**Temporal Patterns:** Identified peak idling hours and long continuous blocks for **K-Means driver segmentation**.  
+**Feature Scaling:** Applied logarithmic scaling to handle extreme outliers and improve **Isolation Forest** anomaly detection.  
+**Attribute Correlation:** Validated linear dependency between **Idle Minutes** and **Estimated Fuel Waste** for the **Eco-Score** heuristic.
+---
+
 ## 🧠 Machine Learning Suite  
 
 ### 🤖 Risk Classification (Supervised)  
