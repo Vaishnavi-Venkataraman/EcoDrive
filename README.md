@@ -46,6 +46,7 @@ EDA transformed **17.5M GPS pings** into a structured telematics dataset, focusi
 **Temporal Patterns:** Identified peak idling hours and long continuous blocks for **K-Means driver segmentation**.  
 **Feature Scaling:** Applied logarithmic scaling to handle extreme outliers and improve **Isolation Forest** anomaly detection.  
 **Attribute Correlation:** Validated linear dependency between **Idle Minutes** and **Estimated Fuel Waste** for the **Eco-Score** heuristic.
+
 ---
 
 ## 🧠 Machine Learning Suite  
